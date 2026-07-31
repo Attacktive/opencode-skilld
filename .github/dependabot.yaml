@@ -14,13 +14,13 @@ updates:
       - 'CI/CD'
     commit-message:
       prefix: 'ci'
-
   - package-ecosystem: 'bun'
     directory: '/'
     schedule:
       interval: 'daily'
       time: '00:00'
     labels:
-      - 'dependencies'
+      - 'CI/CD'
     commit-message:
-      prefix: 'chore'
+      prefix: 'ci'
+    versioning-strategy: 'increase'
