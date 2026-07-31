@@ -131,8 +131,13 @@ const isSource = (source: unknown): source is SkillSource => {
 		return false;
 	}
 
+	// An empty string is refused along with the wrong type: it survives `expand` untouched, so a `target` of `''` reaches `mkdirSync` as `''` and reports itself as an unrefreshable source rather than a mistyped one.
 	for (const optional of [target, stamp, label]) {
-		if (optional !== undefined && typeof optional !== 'string') {
+		if (optional === undefined) {
+			continue;
+		}
+
+		if (typeof optional !== 'string' || optional.length === 0) {
 			return false;
 		}
 	}

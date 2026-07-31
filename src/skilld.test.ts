@@ -178,6 +178,12 @@ test(
 
 		expect(isSource({ repo: 'anthropics/skills', placeholder: 123 }))
 			.toBe(false);
+
+		expect(isSource({ repo: 'anthropics/skills', target: '' }))
+			.toBe(false);
+
+		expect(isSource({ repo: 'anthropics/skills', stamp: '' }))
+			.toBe(false);
 	}
 );
 
