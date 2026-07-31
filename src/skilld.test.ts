@@ -1,15 +1,18 @@
 import type { PluginInput } from '@opencode-ai/plugin';
 import { afterAll, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as pluginModule from './skilld.ts';
 import plugin from './skilld.ts';
-import { TOAST_DELAY_MS, asPlaceholder, expand, isEmpty, isSource, isStale, normalize, slugify } from './internals.ts';
+import { TOAST_DELAY_MS, asPlaceholder, expand, isEmpty, isSource, isStale, normalize, slugify, staging, swap } from './internals.ts';
 
 const INTERVAL_MS = 24 * 60 * 60 * 1000;
 
-/** Every toast is held back until the TUI is listening, so nothing the plugin has to say can be observed before this. */
+/**
+ * Every toast is held back until the TUI is listening, so nothing the plugin has to say can be observed before this.
+ * Two tests wait it out in real time, which is why the suite takes about eight seconds rather than hanging.
+ */
 const UNTIL_TOASTS_LAND_MS = TOAST_DELAY_MS + 500;
 
 const scratch = mkdtempSync(join(tmpdir(), 'skilld-'));
@@ -38,7 +41,7 @@ const listener = () => {
 	const stub: ToastListener = {
 		client: {
 			tui: {
-				showToast: async ({ body }) => { heard.push(body) }
+				showToast: async ({ body }) => { heard.push(body); }
 			}
 		}
 	};
@@ -256,6 +259,103 @@ test(
 );
 
 test(
+	'staging hides both directories beside the target, so a scan ignores them and the swap stays a rename',
+	() => expect(staging('/skills/anthropic'))
+		.toEqual({ incoming: '/skills/.anthropic.incoming', outgoing: '/skills/.anthropic.outgoing' })
+);
+
+test(
+	'swap stands a finished download in for the live directory',
+	() => {
+		const target = join(scratch, 'swap-live');
+		const { incoming, outgoing } = staging(target);
+
+		mkdirSync(join(target, 'stale-skill'), { recursive: true });
+		mkdirSync(join(incoming, 'fresh-skill'), { recursive: true });
+
+		// Left over from an attempt that failed partway; the swap has to clear it rather than trip over it.
+		mkdirSync(join(outgoing, 'debris'), { recursive: true });
+
+		swap(target);
+
+		expect(existsSync(join(target, 'fresh-skill')))
+			.toBe(true);
+
+		expect(existsSync(join(target, 'stale-skill')))
+			.toBe(false);
+
+		// Neither may outlive the swap, or the next launch would sweep a directory that had already gone live.
+		expect(existsSync(incoming))
+			.toBe(false);
+
+		expect(existsSync(outgoing))
+			.toBe(false);
+	}
+);
+
+test(
+	'swap installs a download when no live directory exists yet, as on a first refresh',
+	() => {
+		const target = join(scratch, 'swap-first-run');
+		const { incoming } = staging(target);
+
+		mkdirSync(join(incoming, 'fresh-skill'), { recursive: true });
+
+		swap(target);
+
+		expect(existsSync(join(target, 'fresh-skill')))
+			.toBe(true);
+	}
+);
+
+test(
+	'swap puts the live directory back when there is nothing to stand in for it',
+	() => {
+		const target = join(scratch, 'swap-restore');
+		mkdirSync(join(target, 'precious-skill'), { recursive: true });
+
+		// No incoming directory at all, which is what a download that wrote nothing leaves behind — the live skills must survive it.
+		expect(() => swap(target))
+			.toThrow();
+
+		expect(existsSync(join(target, 'precious-skill')))
+			.toBe(true);
+	}
+);
+
+test(
+	'swap shrugs off a parked directory that will not clear, since the install itself has already succeeded',
+	() => {
+		const target = join(scratch, 'swap-cleanup');
+		const { incoming, outgoing } = staging(target);
+
+		mkdirSync(join(target, 'stale-skill'), { recursive: true });
+		writeFileSync(join(target, 'stale-skill', 'SKILL.md'), '');
+		mkdirSync(join(incoming, 'fresh-skill'), { recursive: true });
+
+		/*
+		 * Stripping the write bit keeps the parked skill's contents from being unlinked, which fails the final cleanup and nothing else.
+		 * Windows ignores the bit on directories and root ignores it everywhere, so there the cleanup simply succeeds — the assertions hold either way.
+		 */
+		chmodSync(join(target, 'stale-skill'), 0o555);
+
+		try {
+			expect(() => swap(target))
+				.not.toThrow();
+
+			expect(existsSync(join(target, 'fresh-skill')))
+				.toBe(true);
+		} finally {
+			const parked = join(outgoing, 'stale-skill');
+
+			if (existsSync(parked)) {
+				chmodSync(parked, 0o755);
+			}
+		}
+	}
+);
+
+test(
 	'isStale is stale when there is no stamp at all',
 	() => {
 		expect(isStale(join(scratch, 'never-refreshed'), INTERVAL_MS))
@@ -373,7 +473,7 @@ test(
 		mkdirSync(join(target, 'precious-skill'), { recursive: true });
 		writeFileSync(join(target, 'precious-skill', 'SKILL.md'), '');
 
-		// The placeholder is cleared before staleness is even considered, so a stamp written just now exercises that without letting the test reach for the network.
+		// A stamp written just now keeps the test off the network: the source counts as fresh, so the plugin only ensures the directory exists and sweeps staging.
 		const stamp = join(scratch, 'refreshed-just-now');
 		writeFileSync(stamp, '');
 

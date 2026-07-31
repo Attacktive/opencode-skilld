@@ -17,7 +17,7 @@ import type { Plugin } from '@opencode-ai/plugin';
 import { spawn } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { DEFAULT_INTERVAL_MS, TOAST_DELAY_MS, isEmpty, isSource, isStale, normalize, type Options } from './internals.ts';
+import { DEFAULT_INTERVAL_MS, TOAST_DELAY_MS, isEmpty, isSource, isStale, normalize, staging, swap, type Options } from './internals.ts';
 
 const NOTICE_MS = 12_345;
 
@@ -81,18 +81,20 @@ const plugin: Plugin = async ({ client }, options) => {
 
 			const { repo, target, stamp, placeholder } = source;
 
+			const { incoming, outgoing } = staging(target);
+
 			let placeholderPath: string | undefined = undefined;
 
 			if (placeholder !== false) {
-				placeholderPath = `${target}/${placeholder}`;
+				placeholderPath = `${incoming}/${placeholder}`;
 			}
 
-			// Both of these run before opencode scans for skills: the directory has to exist for a matching `skills.paths` entry to resolve on a machine that has never refreshed, and the placeholder has to be gone in case a previous refresh died between installing and cleaning up.
-			mkdirSync(target, { recursive: true });
+			// Only the parent, which is where staging goes. `target` itself appears once a refresh has actually succeeded, so an interrupted one leaves nothing that reads as an installed-but-empty skill set — and a `skills.paths` entry pointing at a directory that is not there yet is skipped just as silently as one pointing at an empty directory.
+			mkdirSync(dirname(target), { recursive: true });
 
-			if (placeholderPath) {
-				rmSync(placeholderPath, { recursive: true, force: true });
-			}
+			// Staging left behind by a launch that quit mid-download can never be swapped in, since the handler that would have done it died with the parent — so discarding it is always correct.
+			rmSync(incoming, { recursive: true, force: true });
+			rmSync(outgoing, { recursive: true, force: true });
 
 			if (!isStale(stamp, staleAfter)) {
 				continue;
@@ -116,7 +118,7 @@ const plugin: Plugin = async ({ client }, options) => {
 			// `gh` is spawned directly rather than through a shell: the arguments need no quoting, and it keeps the one platform-specific assumption in this file from being "Git Bash is on PATH".
 			const refresh = spawn(
 				'gh',
-				['skill', 'install', repo, '--all', '--dir', target, '--force'],
+				['skill', 'install', repo, '--all', '--dir', incoming, '--force'],
 				{ stdio: 'ignore' }
 			);
 
@@ -161,6 +163,14 @@ const plugin: Plugin = async ({ client }, options) => {
 							rmSync(placeholderPath, { recursive: true, force: true });
 						}
 
+						// The download becomes the live directory only once it is whole, so nothing ever scans a half-written one.
+						swap(target);
+					} catch {
+						toast(`Downloaded ${label}, but could not install it — the skills you already had are untouched.`, 'error');
+						return;
+					}
+
+					try {
 						mkdirSync(dirname(stamp), { recursive: true });
 
 						// Written last, so it records a refresh that actually finished and nothing else.

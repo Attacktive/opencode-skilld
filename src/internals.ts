@@ -5,8 +5,9 @@
  * Nothing here is public API: it is split out to keep that file loadable and these helpers testable, and it changes with the implementation.
  */
 
-import { readdirSync, statSync } from 'node:fs';
+import { mkdirSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
+import { basename, dirname } from 'node:path';
 
 /** Refreshing more often than this buys nothing for a repository that lands changes on the order of once a week. */
 const DEFAULT_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -155,6 +156,11 @@ const normalize = (source: SkillSource): NormalizedSource => {
 
 	const slug = slugify(configured.repo);
 
+	/*
+	 * Deliberately not `~/.config/opencode/skills/<slug>`, tempting as that is for saving the user a `skills.paths` entry.
+	 * opencode discovers skills exactly one level deep, so a per-source subdirectory there is never found — and a directory of its own is what makes the swap safe, since a refresh replaces all of `target` and would take anything else living there with it.
+	 * This XDG-shaped layout is what opencode uses on Windows too, so the same defaults are correct there and must not be moved to `%APPDATA%`.
+	 */
 	const target = expand(configured.target ?? `${homedir()}/.local/share/opencode/skills/${slug}`);
 	const stamp = expand(configured.stamp ?? `${homedir()}/.local/state/opencode/${slug}-refreshed`);
 
@@ -178,6 +184,46 @@ const isStale = (stamp: string, interval: number) => {
 	}
 };
 
+/**
+ * Where a download is assembled before it stands in for the live directory, and where the live one is parked while they trade places.
+ * Siblings of `target` rather than anything under `os.tmpdir()`, because a rename across filesystems fails with `EXDEV` and the copy it would take instead is not atomic.
+ * Hidden, because a sibling is a sibling: point `skills.paths` at the parent directory and an unhidden one would be scanned as a skill with no `SKILL.md` in it.
+ */
+const staging = (target: string) => {
+	const hidden = `${dirname(target)}/.${basename(target)}`;
+
+	return { incoming: `${hidden}.incoming`, outgoing: `${hidden}.outgoing` };
+};
+
+/**
+ * Stands a finished download in for the live directory, so a half-written one is never what opencode scans.
+ * Not a single atomic step — nothing Node exposes can exchange two directories — but `target` is absent for two renames rather than for the length of a download.
+ */
+const swap = (target: string) => {
+	const { incoming, outgoing } = staging(target);
+
+	rmSync(outgoing, { recursive: true, force: true });
+
+	// A first refresh has no live directory to move aside, and conjuring an empty one costs less than a branch for it.
+	mkdirSync(target, { recursive: true });
+	renameSync(target, outgoing);
+
+	try {
+		renameSync(incoming, target);
+	} catch (error) {
+		// Never leave nothing behind: put the live directory back and let the caller report it.
+		renameSync(outgoing, target);
+
+		throw error;
+	}
+
+	try {
+		rmSync(outgoing, { recursive: true, force: true });
+	} catch {
+		// The download is already live, so a parked directory that will not clear is no failed install — it is hidden, and the next launch sweeps it.
+	}
+};
+
 /** Distinguishes a first launch, where `target` is missing outright, from a merely dated one. */
 const isEmpty = (target: string) => {
 	try {
@@ -187,4 +233,4 @@ const isEmpty = (target: string) => {
 	}
 };
 
-export { DEFAULT_INTERVAL_MS, TOAST_DELAY_MS, DEFAULT_PLACEHOLDER, type SkillRepository, type SkillSource, type Options, type NormalizedSource, slugify, expand, asPlaceholder, isSource, normalize, isStale, isEmpty };
+export { DEFAULT_INTERVAL_MS, TOAST_DELAY_MS, DEFAULT_PLACEHOLDER, type SkillRepository, type SkillSource, type Options, type NormalizedSource, slugify, expand, asPlaceholder, isSource, normalize, staging, swap, isStale, isEmpty };
