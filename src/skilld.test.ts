@@ -1,0 +1,386 @@
+import type { PluginInput } from '@opencode-ai/plugin';
+import { afterAll, expect, test } from 'bun:test';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { join } from 'node:path';
+import * as pluginModule from './skilld.ts';
+import plugin from './skilld.ts';
+import { TOAST_DELAY_MS, asPlaceholder, expand, isEmpty, isSource, isStale, normalize, slugify } from './internals.ts';
+
+const INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+/** Every toast is held back until the TUI is listening, so nothing the plugin has to say can be observed before this. */
+const UNTIL_TOASTS_LAND_MS = TOAST_DELAY_MS + 500;
+
+const scratch = mkdtempSync(join(tmpdir(), 'skilld-'));
+
+afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+
+interface Toast {
+	title: string;
+	message: string;
+	variant: string;
+	duration?: number;
+}
+
+/** The sliver of {@link PluginInput} the plugin actually reaches for. The rest of it cannot be stood up, hence the cast below. */
+interface ToastListener {
+	client: {
+		tui: {
+			showToast: (options: { body: Toast }) => Promise<void>;
+		};
+	};
+}
+
+const listener = () => {
+	const heard: Toast[] = [];
+
+	const stub: ToastListener = {
+		client: {
+			tui: {
+				showToast: async ({ body }) => { heard.push(body) }
+			}
+		}
+	};
+
+	return { heard, input: stub as unknown as PluginInput };
+};
+
+test(
+	'the plugin module exports nothing but functions, or opencode refuses to load it at all',
+	() => {
+		// opencode walks every export and fails the whole module with "Plugin export is not a function" on the first one that is not callable, so a stray helper export silently costs you the entire plugin.
+		const offenders = Object.entries(pluginModule)
+			.filter(([, value]) => typeof value !== 'function')
+			.map(([name]) => name);
+
+		expect(offenders).toEqual([]);
+	}
+);
+
+test(
+	'slugify replaces the separator so a repo can name a directory',
+	() => expect(slugify('anthropics/skills')).toBe('anthropics-skills')
+);
+
+test(
+	'slugify leaves a name with nothing to replace alone',
+	() => expect(slugify('skills')).toBe('skills')
+);
+
+test(
+	'expand turns a leading tilde into a real path, since nothing here goes through a shell',
+	() => {
+		expect(expand('~/skills'))
+			.toBe(`${homedir()}/skills`);
+
+		expect(expand('~'))
+			.toBe(homedir());
+	}
+);
+
+test(
+	'expand leaves a path alone when the tilde is not the whole first segment',
+	() => {
+		expect(expand('/opt/~/skills'))
+			.toBe('/opt/~/skills');
+
+		expect(expand('~user/skills'))
+			.toBe('~user/skills');
+	}
+);
+
+test(
+	'asPlaceholder defaults only when nothing was configured',
+	() => {
+		expect(asPlaceholder(undefined))
+			.toBe('template');
+
+		expect(asPlaceholder('example'))
+			.toBe('example');
+
+		expect(asPlaceholder(false))
+			.toBe(false);
+	}
+);
+
+test(
+	'asPlaceholder refuses anything that would point rmSync at the target itself',
+	() => {
+		expect(asPlaceholder(''))
+			.toBe(false);
+
+		expect(asPlaceholder('.'))
+			.toBe(false);
+	}
+);
+
+test(
+	'asPlaceholder refuses anything that would point rmSync outside the target',
+	() => {
+		expect(asPlaceholder('..'))
+			.toBe(false);
+
+		expect(asPlaceholder('../../skills'))
+			.toBe(false);
+
+		expect(asPlaceholder('nested/template'))
+			.toBe(false);
+
+		expect(asPlaceholder('nested\\template'))
+			.toBe(false);
+	}
+);
+
+test(
+	'isSource accepts the two documented shapes',
+	() => {
+		expect(isSource('anthropics/skills'))
+			.toBe(true);
+
+		expect(isSource({ repo: 'anthropics/skills' }))
+			.toBe(true);
+
+		expect(isSource({ repo: 'anthropics/skills', target: '~/skills', stamp: '~/stamp', label: 'the skills', placeholder: false }))
+			.toBe(true);
+	}
+);
+
+test(
+	'isSource rejects whatever else a hand-written config file might hold',
+	() => {
+		expect(isSource(''))
+			.toBe(false);
+
+		expect(isSource({ target: '/skills' }))
+			.toBe(false);
+
+		expect(isSource({ repo: '' }))
+			.toBe(false);
+
+		expect(isSource({ repo: 42 }))
+			.toBe(false);
+
+		expect(isSource(null))
+			.toBe(false);
+
+		expect(isSource(undefined))
+			.toBe(false);
+
+		expect(isSource({ repo: 'anthropics/skills', target: 123 }))
+			.toBe(false);
+
+		expect(isSource({ repo: 'anthropics/skills', stamp: true }))
+			.toBe(false);
+
+		expect(isSource({ repo: 'anthropics/skills', label: {} }))
+			.toBe(false);
+
+		expect(isSource({ repo: 'anthropics/skills', placeholder: 123 }))
+			.toBe(false);
+	}
+);
+
+test(
+	'normalize derives every path from a bare repo string',
+	() => {
+		const source = normalize('anthropics/skills');
+
+		expect(source).toEqual({
+			repo: 'anthropics/skills',
+			target: `${homedir()}/.local/share/opencode/skills/anthropics-skills`,
+			stamp: `${homedir()}/.local/state/opencode/anthropics-skills-refreshed`,
+			label: 'anthropics/skills',
+			placeholder: 'template'
+		});
+	}
+);
+
+test(
+	'normalize fills the same defaults in for an object that only names a repo',
+	() => {
+		expect(normalize({ repo: 'anthropics/skills' }))
+			.toEqual(normalize('anthropics/skills'));
+	}
+);
+
+test(
+	'normalize honours every override',
+	() => {
+		const overridden = {
+			repo: 'someone/their-skills',
+			target: '/skills',
+			stamp: '/state/stamp',
+			label: 'their skills',
+			placeholder: 'example'
+		};
+
+		expect(normalize(overridden))
+			.toEqual(overridden);
+	}
+);
+
+test(
+	'normalize keeps `placeholder: false` rather than defaulting it, so nothing is deleted',
+	() => {
+		expect(normalize({ repo: 'someone/their-skills', placeholder: false }).placeholder)
+			.toBe(false);
+	}
+);
+
+test(
+	'normalize expands a tilde in the paths it was handed',
+	() => {
+		const source = normalize({ repo: 'someone/their-skills', target: '~/skills', stamp: '~/state/stamp' });
+
+		expect(source.target)
+			.toBe(`${homedir()}/skills`);
+
+		expect(source.stamp)
+			.toBe(`${homedir()}/state/stamp`);
+	}
+);
+
+test(
+	'normalize drops a placeholder that would have deleted the whole target',
+	() => {
+		expect(normalize({ repo: 'someone/their-skills', placeholder: '' }).placeholder)
+			.toBe(false);
+	}
+);
+
+test(
+	'isStale is stale when there is no stamp at all',
+	() => {
+		expect(isStale(join(scratch, 'never-refreshed'), INTERVAL_MS))
+			.toBe(true);
+	}
+);
+
+test(
+	'isStale is fresh when the stamp was just written',
+	() => {
+		const stamp = join(scratch, 'just-refreshed');
+		writeFileSync(stamp, '');
+
+		expect(isStale(stamp, INTERVAL_MS))
+			.toBe(false);
+	}
+);
+
+test(
+	'isStale is stale once the stamp is older than the interval',
+	() => {
+		const stamp = join(scratch, 'refreshed-long-ago');
+		writeFileSync(stamp, '');
+
+		const wellPastTheInterval = new Date(Date.now() - 2 * INTERVAL_MS);
+		utimesSync(stamp, wellPastTheInterval, wellPastTheInterval);
+
+		expect(isStale(stamp, INTERVAL_MS))
+			.toBe(true);
+	}
+);
+
+test(
+	'isEmpty is empty when the directory does not exist',
+	() => {
+		expect(isEmpty(join(scratch, 'absent')))
+			.toBe(true);
+	}
+);
+
+test(
+	'isEmpty is empty when the directory exists with nothing in it',
+	() => {
+		const target = join(scratch, 'bare');
+		mkdirSync(target, { recursive: true });
+
+		expect(isEmpty(target))
+			.toBe(true);
+	}
+);
+
+test(
+	'isEmpty is not empty once a skill has been installed',
+	() => {
+		const target = join(scratch, 'populated');
+		mkdirSync(join(target, 'some-skill'), { recursive: true });
+
+		expect(isEmpty(target))
+			.toBe(false);
+	}
+);
+
+test(
+	'the plugin says nothing at all until it is configured',
+	async () => {
+		const { heard, input } = listener();
+
+		expect(await plugin(input, undefined))
+			.toEqual({});
+
+		expect(await plugin(input, { sources: [] }))
+			.toEqual({});
+
+		await Bun.sleep(UNTIL_TOASTS_LAND_MS);
+
+		expect(heard).toEqual([]);
+	},
+	UNTIL_TOASTS_LAND_MS + 5_000
+);
+
+test(
+	'the plugin reports malformed options rather than throwing on them',
+	async () => {
+		const cases = [
+			{ sources: 'anthropics/skills' },
+			{ sources: [{ target: '/nowhere' }] },
+			{ sources: [{ repo: 'someone/their-skills', target: 123 }] },
+			{ sources: [], interval: 'daily' },
+			{ source: ['anthropics/skills'] }
+		];
+
+		const { heard, input } = listener();
+
+		for (const options of cases) {
+			expect(await plugin(input, options))
+				.toEqual({});
+		}
+
+		await Bun.sleep(UNTIL_TOASTS_LAND_MS);
+
+		expect(heard.map((toast) => toast.variant))
+			.toEqual(['error', 'error', 'error', 'error', 'error']);
+
+		// The typo'd `source` would otherwise be indistinguishable from a plugin that was never configured.
+		expect(heard[4]?.message)
+			.toContain('`source`');
+	},
+	UNTIL_TOASTS_LAND_MS + 5_000
+);
+
+test(
+	'the plugin leaves the target alone when a placeholder would have taken it with it',
+	async () => {
+		const target = join(scratch, 'not-to-be-deleted');
+		mkdirSync(join(target, 'precious-skill'), { recursive: true });
+		writeFileSync(join(target, 'precious-skill', 'SKILL.md'), '');
+
+		// The placeholder is cleared before staleness is even considered, so a stamp written just now exercises that without letting the test reach for the network.
+		const stamp = join(scratch, 'refreshed-just-now');
+		writeFileSync(stamp, '');
+
+		const { input } = listener();
+
+		await plugin(
+			input,
+			{
+				sources: [{ repo: 'someone/their-skills', target, stamp, placeholder: '' }]
+			}
+		);
+
+		expect(existsSync(join(target, 'precious-skill', 'SKILL.md')))
+			.toBe(true);
+	}
+);
