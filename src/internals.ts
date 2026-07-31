@@ -116,6 +116,25 @@ const asPlaceholder = (placeholder: unknown): string | false => {
 	return placeholder;
 };
 
+/** A non-empty string, which is the only text an option may hold: `''` survives `expand` untouched, so a `target` of `''` would reach `mkdirSync` as `''` and report itself as an unrefreshable source rather than a mistyped one. */
+const isText = (value: unknown): value is string => typeof value === 'string' && value.length > 0;
+
+/** Absent or a non-empty string — the shape every optional text field has to fit. */
+const isOptionalText = (value: unknown) => value === undefined || isText(value);
+
+/** The interval is taken only as a finite number of milliseconds: absent falls back to the default, and anything else comes back as `undefined` so the caller can complain. */
+const asInterval = (interval: unknown): number | undefined => {
+	if (interval === undefined) {
+		return DEFAULT_INTERVAL_MS;
+	}
+
+	if (typeof interval === 'number' && Number.isFinite(interval)) {
+		return interval;
+	}
+
+	return undefined;
+};
+
 /** Everything downstream trusts what this passes — `normalize` takes it without checking again — so the optional fields have to hold their documented types too, or a mistyped `target` becomes a crash instead of a toast. */
 const isSource = (source: unknown): source is SkillSource => {
 	if (typeof source === 'string') {
@@ -128,19 +147,12 @@ const isSource = (source: unknown): source is SkillSource => {
 
 	const { repo, target, stamp, label, placeholder } = source as { [K in keyof SkillRepository]: unknown };
 
-	if (typeof repo !== 'string' || repo.length === 0) {
+	if (!isText(repo)) {
 		return false;
 	}
 
-	// An empty string is refused along with the wrong type: it survives `expand` untouched, so a `target` of `''` reaches `mkdirSync` as `''` and reports itself as an unrefreshable source rather than a mistyped one.
-	for (const optional of [target, stamp, label]) {
-		if (optional === undefined) {
-			continue;
-		}
-
-		if (typeof optional !== 'string' || optional.length === 0) {
-			return false;
-		}
+	if (![target, stamp, label].every(isOptionalText)) {
+		return false;
 	}
 
 	return placeholder === undefined || typeof placeholder === 'string' || placeholder === false;
@@ -233,4 +245,4 @@ const isEmpty = (target: string) => {
 	}
 };
 
-export { DEFAULT_INTERVAL_MS, TOAST_DELAY_MS, DEFAULT_PLACEHOLDER, type SkillRepository, type SkillSource, type Options, type NormalizedSource, slugify, expand, asPlaceholder, isSource, normalize, staging, swap, isStale, isEmpty };
+export { DEFAULT_INTERVAL_MS, TOAST_DELAY_MS, DEFAULT_PLACEHOLDER, type SkillRepository, type SkillSource, type Options, type NormalizedSource, slugify, expand, asInterval, asPlaceholder, isSource, normalize, staging, swap, isStale, isEmpty };

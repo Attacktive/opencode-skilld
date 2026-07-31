@@ -17,18 +17,154 @@ import type { Plugin } from '@opencode-ai/plugin';
 import { spawn } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { DEFAULT_INTERVAL_MS, TOAST_DELAY_MS, isEmpty, isSource, isStale, normalize, staging, swap, type Options } from './internals.ts';
+import { DEFAULT_INTERVAL_MS, TOAST_DELAY_MS, asInterval, isEmpty, isSource, isStale, normalize, staging, swap, type Options, type SkillSource } from './internals.ts';
 
 const NOTICE_MS = 12_345;
 
 /** Exhaustive against {@link Options} by construction: a key added there refuses to compile until it is mirrored here. */
 const KNOWN_OPTIONS: Record<keyof Options, null> = { sources: null, interval: null };
 
+/** The plugin's only voice. Fire-and-forget by design, so nothing that happens to a toast can ever surface as an error. */
+type Toast = (message: string, variant: 'info' | 'success' | 'error', duration?: number) => void;
+
+/** Fires one source's refresh off in the background: sweep leftover staging, skip a fresh source, download into staging, stand it in for the live directory, record the stamp. Never throws — every failure degrades to a toast. */
+const refresh = (configured: SkillSource, staleAfter: number, toast: Toast) => {
+	// The catch at the bottom needs a name for the source no matter how little of the body ran.
+	let label = JSON.stringify(configured);
+
+	let notice: ReturnType<typeof setTimeout> | undefined;
+
+	try {
+		const source = normalize(configured);
+		label = source.label;
+
+		const { repo, target, stamp, placeholder } = source;
+
+		const { incoming, outgoing } = staging(target);
+
+		let placeholderPath: string | undefined;
+
+		if (placeholder !== false) {
+			placeholderPath = `${incoming}/${placeholder}`;
+		}
+
+		// Only the parent, which is where staging goes. `target` itself appears once a refresh has actually succeeded, so an interrupted one leaves nothing that reads as an installed-but-empty skill set — and a `skills.paths` entry pointing at a directory that is not there yet is skipped just as silently as one pointing at an empty directory.
+		mkdirSync(dirname(target), { recursive: true });
+
+		// Staging left behind by a launch that quit mid-download can never be swapped in, since the handler that would have done it died with the parent — so discarding it is always correct.
+		rmSync(incoming, { recursive: true, force: true });
+		rmSync(outgoing, { recursive: true, force: true });
+
+		if (!isStale(stamp, staleAfter)) {
+			return;
+		}
+
+		let announcement = `Refreshing ${label} from GitHub in the background.\nCarry on working — you will get a second message once it is done.`;
+
+		const first = isEmpty(target);
+		if (first) {
+			announcement = `Fetching ${label} from GitHub in the background.\nThis usually takes a minute or so — carry on working, and you will get a second message the moment it is ready.`;
+		}
+
+		// Cancelled the moment the refresh settles: one that beats the TUI to it would otherwise promise a second message it has already sent, and a missing `gh` — which fails within milliseconds — would announce a download that never started.
+		notice = setTimeout(
+			() => toast(announcement, 'info', NOTICE_MS),
+			TOAST_DELAY_MS
+		);
+
+		notice.unref();
+
+		// `gh` is spawned directly rather than through a shell: the arguments need no quoting, and it keeps the one platform-specific assumption in this file from being "Git Bash is on PATH".
+		const install = spawn(
+			'gh',
+			['skill', 'install', repo, '--all', '--dir', incoming, '--force'],
+			{ stdio: 'ignore' }
+		);
+
+		// Node warns that `exit` may or may not follow `error`, so whichever fires first speaks for the child.
+		let settled = false;
+
+		install.on(
+			'error',
+			() => {
+				if (settled) {
+					return;
+				}
+
+				settled = true;
+				clearTimeout(notice);
+				toast(`Could not refresh ${label}: is \`gh\` installed and on PATH?`, 'error');
+			}
+		);
+
+		install.on(
+			'exit',
+			(code: number | null, signal: NodeJS.Signals | null) => {
+				if (settled) {
+					return;
+				}
+
+				settled = true;
+				clearTimeout(notice);
+
+				if (signal !== null) {
+					toast(`Failed to refresh ${label} (\`gh\` was killed by ${signal}).`, 'error');
+					return;
+				}
+
+				if (code !== 0) {
+					toast(`Failed to refresh ${label} (\`gh\` exited with code ${code}).`, 'error');
+					return;
+				}
+
+				try {
+					if (placeholderPath) {
+						rmSync(placeholderPath, { recursive: true, force: true });
+					}
+
+					// The download becomes the live directory only once it is whole, so nothing ever scans a half-written one.
+					swap(target);
+				} catch {
+					toast(`Downloaded ${label}, but could not install it — the skills you already had are untouched.`, 'error');
+					return;
+				}
+
+				try {
+					mkdirSync(dirname(stamp), { recursive: true });
+
+					// Written last, so it records a refresh that actually finished and nothing else.
+					writeFileSync(stamp, '');
+				} catch {
+					toast(`Refreshed ${label}, but could not record it — expect a redundant download next launch.`, 'error');
+					return;
+				}
+
+				let message = `${label} has been refreshed.\nRestart opencode to pick up any changes.`;
+
+				if (first) {
+					message = `${label} is ready.\nRestart opencode to load it.`;
+				}
+
+				toast(message, 'success');
+			}
+		);
+
+		/*
+		 * Quitting opencode must never wait on a download, so the child is unreferenced — orphaned rather than killed.
+		 * The handlers above go with the parent, so a refresh that outlives its launch finishes the download and then records nothing, costing one redundant download next launch.
+		 */
+		install.unref();
+	} catch {
+		clearTimeout(notice);
+		toast(`Could not refresh ${label}.`, 'error');
+	}
+};
+
 const plugin: Plugin = async ({ client }, options) => {
 	const loaded = Date.now();
 
 	/** Decoration, so a TUI that is not listening — or not running at all, under `opencode run` — must never surface as an error. */
-	const toast = (message: string, variant: 'info' | 'success' | 'error', duration?: number) => {
+	const toast: Toast = (message, variant, duration) => {
 		const held = setTimeout(
 			() => {
 				client.tui.showToast({ body: { title: 'Skills', message, variant, duration } })
@@ -49,19 +185,18 @@ const plugin: Plugin = async ({ client }, options) => {
 		toast(`Ignoring unknown options: ${strangers.map((stranger) => `\`${stranger}\``).join(', ')}. The options are \`sources\` and \`interval\`.`, 'error');
 	}
 
-	const { sources = [], interval = DEFAULT_INTERVAL_MS } = given;
+	const { sources = [] } = given;
 
 	if (!Array.isArray(sources)) {
 		toast('Ignoring `sources`: it has to be an array of repositories.', 'error');
 		return {};
 	}
 
-	let staleAfter = DEFAULT_INTERVAL_MS;
+	let staleAfter = asInterval(given.interval);
 
-	if (typeof interval === 'number' && Number.isFinite(interval)) {
-		staleAfter = interval;
-	} else {
-		toast(`Ignoring \`interval\`: ${JSON.stringify(interval)} is not a number of milliseconds.`, 'error');
+	if (staleAfter === undefined) {
+		toast(`Ignoring \`interval\`: ${JSON.stringify(given.interval)} is not a number of milliseconds.`, 'error');
+		staleAfter = DEFAULT_INTERVAL_MS;
 	}
 
 	for (const configured of sources) {
@@ -70,135 +205,7 @@ const plugin: Plugin = async ({ client }, options) => {
 			continue;
 		}
 
-		// The catch at the bottom needs a name for the source no matter how little of the body ran.
-		let label = JSON.stringify(configured);
-
-		let notice: ReturnType<typeof setTimeout> | undefined = undefined;
-
-		try {
-			const source = normalize(configured);
-			label = source.label;
-
-			const { repo, target, stamp, placeholder } = source;
-
-			const { incoming, outgoing } = staging(target);
-
-			let placeholderPath: string | undefined = undefined;
-
-			if (placeholder !== false) {
-				placeholderPath = `${incoming}/${placeholder}`;
-			}
-
-			// Only the parent, which is where staging goes. `target` itself appears once a refresh has actually succeeded, so an interrupted one leaves nothing that reads as an installed-but-empty skill set — and a `skills.paths` entry pointing at a directory that is not there yet is skipped just as silently as one pointing at an empty directory.
-			mkdirSync(dirname(target), { recursive: true });
-
-			// Staging left behind by a launch that quit mid-download can never be swapped in, since the handler that would have done it died with the parent — so discarding it is always correct.
-			rmSync(incoming, { recursive: true, force: true });
-			rmSync(outgoing, { recursive: true, force: true });
-
-			if (!isStale(stamp, staleAfter)) {
-				continue;
-			}
-
-			let announcement = `Refreshing ${label} from GitHub in the background.\nCarry on working — you will get a second message once it is done.`;
-
-			const first = isEmpty(target);
-			if (first) {
-				announcement = `Fetching ${label} from GitHub in the background.\nThis usually takes a minute or so — carry on working, and you will get a second message the moment it is ready.`;
-			}
-
-			// Cancelled the moment the refresh settles: one that beats the TUI to it would otherwise promise a second message it has already sent, and a missing `gh` — which fails within milliseconds — would announce a download that never started.
-			notice = setTimeout(
-				() => toast(announcement, 'info', NOTICE_MS),
-				TOAST_DELAY_MS
-			);
-
-			notice.unref();
-
-			// `gh` is spawned directly rather than through a shell: the arguments need no quoting, and it keeps the one platform-specific assumption in this file from being "Git Bash is on PATH".
-			const refresh = spawn(
-				'gh',
-				['skill', 'install', repo, '--all', '--dir', incoming, '--force'],
-				{ stdio: 'ignore' }
-			);
-
-			// Node warns that `exit` may or may not follow `error`, so whichever fires first speaks for the child.
-			let settled = false;
-
-			refresh.on(
-				'error',
-				() => {
-					if (settled) {
-						return;
-					}
-
-					settled = true;
-					clearTimeout(notice);
-					toast(`Could not refresh ${label}: is \`gh\` installed and on PATH?`, 'error');
-				}
-			);
-
-			refresh.on(
-				'exit',
-				(code: number | null, signal: NodeJS.Signals | null) => {
-					if (settled) {
-						return;
-					}
-
-					settled = true;
-					clearTimeout(notice);
-
-					if (signal !== null) {
-						toast(`Failed to refresh ${label} (\`gh\` was killed by ${signal}).`, 'error');
-						return;
-					}
-
-					if (code !== 0) {
-						toast(`Failed to refresh ${label} (\`gh\` exited with code ${code}).`, 'error');
-						return;
-					}
-
-					try {
-						if (placeholderPath) {
-							rmSync(placeholderPath, { recursive: true, force: true });
-						}
-
-						// The download becomes the live directory only once it is whole, so nothing ever scans a half-written one.
-						swap(target);
-					} catch {
-						toast(`Downloaded ${label}, but could not install it — the skills you already had are untouched.`, 'error');
-						return;
-					}
-
-					try {
-						mkdirSync(dirname(stamp), { recursive: true });
-
-						// Written last, so it records a refresh that actually finished and nothing else.
-						writeFileSync(stamp, '');
-					} catch {
-						toast(`Refreshed ${label}, but could not record it — expect a redundant download next launch.`, 'error');
-						return;
-					}
-
-					let message = `${label} has been refreshed.\nRestart opencode to pick up any changes.`;
-
-					if (first) {
-						message = `${label} is ready.\nRestart opencode to load it.`;
-					}
-
-					toast(message, 'success');
-				}
-			);
-
-			/*
-			 * Quitting opencode must never wait on a download, so the child is unreferenced — orphaned rather than killed.
-			 * The handlers above go with the parent, so a refresh that outlives its launch finishes the download and then records nothing, costing one redundant download next launch.
-			 */
-			refresh.unref();
-		} catch {
-			clearTimeout(notice);
-			toast(`Could not refresh ${label}.`, 'error');
-		}
+		refresh(configured, staleAfter, toast);
 	}
 
 	return {};

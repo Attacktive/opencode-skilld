@@ -5,7 +5,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as pluginModule from './skilld.ts';
 import plugin from './skilld.ts';
-import { TOAST_DELAY_MS, asPlaceholder, expand, isEmpty, isSource, isStale, normalize, slugify, staging, swap } from './internals.ts';
+import { DEFAULT_INTERVAL_MS, TOAST_DELAY_MS, asInterval, asPlaceholder, expand, isEmpty, isSource, isStale, normalize, slugify, staging, swap } from './internals.ts';
 
 const INTERVAL_MS = 24 * 60 * 60 * 1000;
 
@@ -90,6 +90,31 @@ test(
 
 		expect(expand('~user/skills'))
 			.toBe('~user/skills');
+	}
+);
+
+test(
+	'asInterval defaults only when nothing was configured',
+	() => {
+		expect(asInterval(undefined))
+			.toBe(DEFAULT_INTERVAL_MS);
+
+		expect(asInterval(3_600_000))
+			.toBe(3_600_000);
+	}
+);
+
+test(
+	'asInterval refuses whatever is not a finite number of milliseconds',
+	() => {
+		expect(asInterval('daily'))
+			.toBeUndefined();
+
+		expect(asInterval(Number.NaN))
+			.toBeUndefined();
+
+		expect(asInterval(Number.POSITIVE_INFINITY))
+			.toBeUndefined();
 	}
 );
 
