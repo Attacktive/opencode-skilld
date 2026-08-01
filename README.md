@@ -111,6 +111,31 @@ Point `placeholder` at a different directory name if a repository names its plac
 
 It has to be a single directory name. A `""`, a `"."`, a `".."` or anything with a separator in it is refused and nothing is deleted — the deletion is recursive, forced, and aimed inside the finished download, so an empty string would take the whole download with it and a `..` would climb out of it entirely.
 
+## Finding sources
+
+Discovery ships with the same `gh skill` preview the refresh depends on:
+
+```bash
+gh skill search terraform
+gh skill preview anthropics/skills pdf
+```
+
+That searches skills, though, and `sources` takes repositories. Topic search finds those directly — and does not share the Code Search API's ten-a-minute limit:
+
+```bash
+gh api "search/repositories?q=topic:agent-skills&sort=stars&per_page=20" --jq '.items[] | "★\(.stargazers_count)\t\(.full_name)"'
+```
+
+Then check the layout before adding one, because `--all` means a source is a repository you want *whole*, every launch:
+
+```bash
+gh api repos/<owner>/<repo>/contents/skills --jq '.[] | .type + " " + .name'
+```
+
+A flat list of directories, and not too many. A repository that files skills by category — `skills/engineering/<name>/SKILL.md` — sits a level deeper than OpenCode looks, so the refresh succeeds and nothing loads. Several hundred skills is not wrong either, but `--all` puts every one of those descriptions in front of the model at every launch.
+
+And `placeholder` defaults to `"template"` because that is what GitHub's skill template ships; anything not descended from it wants `placeholder: false`.
+
 ## Windows
 
 One variable name, and nothing else. Checked on Windows 11 with `gh` 2.97.
