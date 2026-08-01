@@ -6,8 +6,8 @@ jobs:
   publish:
     runs-on: 'ubuntu-latest'
     permissions:
-      # Required to checkout the code
-      contents: 'read'
+      # Required to checkout the code, and to cut the release at the end
+      contents: 'write'
       # Required to mint the OIDC token that trusted publishing exchanges for npm credentials
       id-token: 'write'
 
@@ -41,3 +41,7 @@ jobs:
           fi
       - name: 'Publish'
         run: 'npm publish'
+      - name: 'Release'
+        uses: 'softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228'
+        with:
+          generate_release_notes: true
