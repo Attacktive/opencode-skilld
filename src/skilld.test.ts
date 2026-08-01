@@ -349,6 +349,20 @@ test(
 );
 
 test(
+	'swap leaves no target behind when a first refresh has nothing to stand in',
+	() => {
+		const target = join(scratch, 'swap-first-run-restore');
+
+		// No live directory and no incoming one either, which is a first refresh whose download wrote nothing. An empty `target` here would read as an installed-but-empty skill set.
+		expect(() => swap(target))
+			.toThrow();
+
+		expect(existsSync(target))
+			.toBe(false);
+	}
+);
+
+test(
 	'swap shrugs off a parked directory that will not clear, since the install itself has already succeeded',
 	() => {
 		const target = join(scratch, 'swap-cleanup');

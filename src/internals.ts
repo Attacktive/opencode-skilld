@@ -5,7 +5,7 @@
  * Nothing here is public API: it is split out to keep that file loadable and these helpers testable, and it changes with the implementation.
  */
 
-import { mkdirSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, renameSync, rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname } from 'node:path';
 
@@ -216,15 +216,23 @@ const swap = (target: string) => {
 
 	rmSync(outgoing, { recursive: true, force: true });
 
-	// A first refresh has no live directory to move aside, and conjuring an empty one costs less than a branch for it.
-	mkdirSync(target, { recursive: true });
-	renameSync(target, outgoing);
+	/*
+	 * A first refresh has no live directory to move aside.
+	 * Conjuring an empty one to keep this branchless is what the failure path below would then restore, leaving behind exactly the installed-but-empty skill set that never creating `target` until a refresh succeeds is meant to rule out.
+	 */
+	const live = existsSync(target);
+
+	if (live) {
+		renameSync(target, outgoing);
+	}
 
 	try {
 		renameSync(incoming, target);
 	} catch (error) {
-		// Never leave nothing behind: put the live directory back and let the caller report it.
-		renameSync(outgoing, target);
+		// Never leave nothing behind: put the live directory back, if there was one at all, and let the caller report it.
+		if (live) {
+			renameSync(outgoing, target);
+		}
 
 		throw error;
 	}
