@@ -1,7 +1,7 @@
 {
 	"name": "opencode-skilld",
 	"version": "1.0.1",
-	"description": "An OpenCode plugin that refreshes skills from GitHub repositories in the background",
+	"description": "An unofficial OpenCode plugin that refreshes skills from GitHub repositories in the background",
 	"license": "MIT",
 	"type": "module",
 	"main": "src/skilld.ts",

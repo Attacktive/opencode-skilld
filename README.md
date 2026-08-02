@@ -5,6 +5,10 @@ An [OpenCode](https://opencode.ai) plugin that keeps skills from GitHub reposito
 `gh skill install --all` takes upwards of a minute, and OpenCode loads plugins before it scans for skills — so refreshing on the critical path would put that minute on every single launch.
 Skilld fires the refresh off unawaited and lets the next launch pick up whatever landed, with a pair of toasts so a first run does not just sit there looking broken.
 
+> [!NOTE]
+> Not built by the OpenCode team, and not affiliated with them in any way.
+> The `opencode-` prefix names what this plugs into rather than who wrote it — [OpenCode asks third-party projects using the name to say so](https://github.com/anomalyco/opencode#building-on-opencode).
+
 ## Requirements
 
 - [`gh`](https://cli.github.com) on `PATH`, logged in, recent enough to have `gh skill` — which is itself in preview and "subject to change without notice", so an older `gh` will not have it at all.
